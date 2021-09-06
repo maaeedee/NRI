@@ -1,7 +1,6 @@
 """
 adapt utils.py to PyTorch 1.9
 """
-
 import numpy as np
 import torch
 from torch.utils.data.dataset import TensorDataset
@@ -9,6 +8,25 @@ from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from torch.autograd import Variable
 
+def create_group_graphs(logits, edge_to_node, num_atoms, k=100):
+    interaction_graphs = torch.zeros(logits.size(0), num_atoms, num_atoms)
+    I = torch.eye(num_atoms)
+    num_sims = logits.size(0)
+    num_edges = edge_to_node.size(0)
+    _, preds = logits.max(-1)
+    off_diag_idx = np.ravel_multi_index(
+        np.where(np.ones((num_atoms, num_atoms)) - np.eye(num_atoms)),
+        [num_atoms, num_atoms])
+    for n_sim in range(num_sims):
+        for n_edge in range(num_edges):
+            sender = edge_to_node[n_edge][0]
+            receiver = edge_to_node[n_edge][1]
+            interaction_graphs[n_sim, sender, receiver] = preds[n_sim, n_edge]
+        interaction_graphs[n_sim] += interaction_graphs[n_sim].T
+        # convert interaction graph to group graph
+        interaction_graphs[n_sim] = torch.tanh(k * torch.matrix_power(interaction_graphs[n_sim] + I, num_atoms))
+    group_graphs_edges = interaction_graphs.view(interaction_graphs.size(0), -1)
+    return group_graphs_edges[:, off_diag_idx]
 
 def my_softmax(x, axis=-1):
     # x: shape: [num_sims, num_edges, num_edgetypes]
@@ -124,18 +142,27 @@ def binary_accuracy(output, labels):
 
 #24 July 2021
 
-def load_data(batch_size=1, suffix=''):
+def load_data(batch_size=1, suffix='', group_level=True):
     loc_train = np.load('data/loc_train' + suffix + '.npy')
     vel_train = np.load('data/vel_train' + suffix + '.npy')
-    edges_train = np.load('data/edges_train' + suffix + '.npy')
+    if group_level:
+        edges_train = np.load('data/groups_train' + suffix + '.npy')
+    else:
+        edges_train = np.load('data/edges_train' + suffix + '.npy')
 
     loc_valid = np.load('data/loc_valid' + suffix + '.npy')
     vel_valid = np.load('data/vel_valid' + suffix + '.npy')
-    edges_valid = np.load('data/edges_valid' + suffix + '.npy')
+    if group_level:
+        edges_valid = np.load('data/groups_valid' + suffix + '.npy')
+    else:
+        edges_valid = np.load('data/edges_valid' + suffix + '.npy')
 
     loc_test = np.load('data/loc_test' + suffix + '.npy')
     vel_test = np.load('data/vel_test' + suffix + '.npy')
-    edges_test = np.load('data/edges_test' + suffix + '.npy')
+    if group_level:
+        edges_test = np.load('data/groups_test' + suffix + '.npy')
+    else:
+        edges_test = np.load('data/edges_test' + suffix + '.npy')
 
     # [num_samples, num_timesteps, num_dims, num_atoms]
     num_atoms = loc_train.shape[3]
@@ -498,6 +525,16 @@ def nll_gaussian(preds, target, variance, add_const=False):
         neg_log_p += const
     return neg_log_p.sum() / (target.size(0) * target.size(1))
 
+
+def compute_group_accuracy(preds, target):
+    """
+    :param preds: predicted group edges; [num_sims, num_edges]
+    :param targets: target group edges; [num_sims, num_edges]
+    :return:
+    """
+    correct = preds.float().data.eq(
+        target.float().data.view_as(preds)).cpu().sum()
+    return np.float(correct) / (target.size(0) * target.size(1))
 
 def edge_accuracy(preds, target):
     _, preds = preds.max(-1)

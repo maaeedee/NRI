@@ -64,7 +64,7 @@ parser.add_argument('--lr-decay', type=int, default=200,
                     help='After how epochs to decay LR by a factor of gamma.')
 parser.add_argument('--gamma', type=float, default=0.5,
                     help='LR decay factor.')
-parser.add_argument('--skip-first', action='store_true', default=False,
+parser.add_argument('--skip-first', action='store_true', default=True,
                     help='Skip first edge type in decoder, i.e. it represents no-edge.')
 parser.add_argument('--var', type=float, default=5e-5,
                     help='Output variance.')
@@ -74,9 +74,11 @@ parser.add_argument('--prior', action='store_true', default=False,
                     help='Whether to use sparsity prior.')
 parser.add_argument('--dynamic-graph', action='store_true', default=False,
                     help='Whether test with dynamically re-computed graph.')
+parser.add_argument("--group-level", action="store_true", default=True, help="use group level.")
 
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
+args.group_level = args.group_level and args.skip_first
 args.factor = not args.no_factor
 print(args)
 
@@ -108,17 +110,19 @@ else:
           "Testing (within this script) will throw an error.")
 
 train_loader, valid_loader, test_loader, loc_max, loc_min, vel_max, vel_min = load_data(
-    args.batch_size, args.suffix)
+    args.batch_size, args.suffix, args.group_level)
 
 # Generate off-diagonal interaction graph
 off_diag = np.ones([args.num_atoms, args.num_atoms]) - np.eye(args.num_atoms)
-
 rel_rec = np.array(encode_onehot(np.where(off_diag)[0]), dtype=np.float32)
 rel_send = np.array(encode_onehot(np.where(off_diag)[1]), dtype=np.float32)
 #rel_rec = torch.FloatTensor(rel_rec)
 rel_rec = torch.from_numpy(rel_rec)
 #rel_send = torch.FloatTensor(rel_send)
 rel_send = torch.from_numpy(rel_send)
+senders = torch.where(rel_send != 0)[1]
+receivers = torch.where(rel_rec !=0)[1]
+edge_to_node = torch.stack([senders,receivers]).T
 
 if args.encoder == 'mlp':
     encoder = MLPEncoder(args.timesteps * args.dims, args.encoder_hidden,
@@ -206,9 +210,7 @@ def train(epoch, best_val_loss):
         #data, relations = Variable(data), Variable(relations)
         #print(type(data), "  ",type(relations))
         data = data.float()
-
         optimizer.zero_grad()
-
         logits = encoder(data, rel_rec, rel_send)
         edges = gumbel_softmax(logits, tau=args.temp, hard=args.hard)
         prob = my_softmax(logits, -1)
@@ -232,9 +234,11 @@ def train(epoch, best_val_loss):
                                              args.edge_types)
 
         loss = loss_nll + loss_kl
-
-        acc = edge_accuracy(logits, relations)
-        acc_train.append(acc)
+        if args.group_level:
+            #acc = edge_accuracy(logits, relations)
+            group_graphs_edges = create_group_graphs(logits, edge_to_node, args.num_atoms)
+            acc = compute_group_accuracy(group_graphs_edges, relations)
+            acc_train.append(acc)
 
         loss.backward()
         optimizer.step()
@@ -274,8 +278,10 @@ def train(epoch, best_val_loss):
         loss_nll = nll_gaussian(output, target, args.var)
         loss_kl = kl_categorical_uniform(prob, args.num_atoms, args.edge_types)
 
-        acc = edge_accuracy(logits, relations)
-        acc_val.append(acc)
+        if args.group_level:
+            group_graphs_edges = create_group_graphs(logits, edge_to_node, args.num_atoms)
+            acc = compute_group_accuracy(group_graphs_edges, relations)
+            acc_val.append(acc)
 
         #mse_val.append(F.mse_loss(output, target).data[0])
         mse_val.append(F.mse_loss(output, target).item())
@@ -348,8 +354,10 @@ def test():
         loss_nll = nll_gaussian(output, target, args.var)
         loss_kl = kl_categorical_uniform(prob, args.num_atoms, args.edge_types)
 
-        acc = edge_accuracy(logits, relations)
-        acc_test.append(acc)
+        if args.group_level:
+            group_graphs_edges = create_group_graphs(logits, edge_to_node, args.num_atoms)
+            acc = compute_group_accuracy(group_graphs_edges, relations)
+            acc_test.append(acc)
 
         mse_test.append(F.mse_loss(output, target).item())
         nll_test.append(loss_nll.item())

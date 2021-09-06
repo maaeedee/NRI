@@ -13,6 +13,12 @@ class MLP(nn.Module):
     """Two-layer fully-connected ELU net with batch norm."""
 
     def __init__(self, n_in, n_hid, n_out, do_prob=0.):
+        """
+         n_in: #units of input layers
+         n_hid: #units of hidden layers
+         n_out: #units of output layers
+         do_prob: dropout probability
+        """
         super(MLP, self).__init__()
         self.fc1 = nn.Linear(n_in, n_hid)
         self.fc2 = nn.Linear(n_hid, n_out)
@@ -31,9 +37,14 @@ class MLP(nn.Module):
                 m.bias.data.zero_()
 
     def batch_norm(self, inputs):
+        """
+        inputs.size(0): batch size
+        inputs.size(1): number of channels
+        """
         x = inputs.view(inputs.size(0) * inputs.size(1), -1)
         x = self.bn(x)
         return x.view(inputs.size(0), inputs.size(1), -1)
+
 
     def forward(self, inputs):
         # Input shape: [num_sims, num_things, num_features]
@@ -45,6 +56,10 @@ class MLP(nn.Module):
 
 class CNN(nn.Module):
     def __init__(self, n_in, n_hid, n_out, do_prob=0.):
+        """
+        n_in: number of input channels
+        n_hid n_out: number of output channels
+        """
         super(CNN, self).__init__()
         self.pool = nn.MaxPool1d(kernel_size=2, stride=None, padding=0,
                                  dilation=1, return_indices=False,
@@ -89,10 +104,9 @@ class CNN(nn.Module):
 class MLPEncoder(nn.Module):
     def __init__(self, n_in, n_hid, n_out, do_prob=0., factor=True):
         super(MLPEncoder, self).__init__()
-
         self.factor = factor
 
-        self.mlp1 = MLP(n_in, n_hid, n_hid, do_prob)
+        self.mlp1 = MLP(n_in, n_hid, n_hid, do_prob) #Equation(5) in the paper: h^1_j = femb(x_j)
         self.mlp2 = MLP(n_hid * 2, n_hid, n_hid, do_prob)
         self.mlp3 = MLP(n_hid, n_hid, n_hid, do_prob)
         if self.factor:
@@ -111,19 +125,33 @@ class MLPEncoder(nn.Module):
                 m.bias.data.fill_(0.1)
 
     def edge2node(self, x, rel_rec, rel_send):
+        """
+        update node embeddings according to incoming edges
+        G = (V, E)
+         x: embedding vectors of edges: |E| * he (he: dimensions of each edge embedding)
+         rel_rec: Matrix denoting incomming edges of nodes: |E|*|V|
+        """
         # NOTE: Assumes that we have the same graph across all samples.
-        incoming = torch.matmul(rel_rec.t(), x)
-        return incoming / incoming.size(1)
+        incoming = torch.matmul(rel_rec.t(), x) #|V|* he
+        return incoming / incoming.size(1) #?
 
     def node2edge(self, x, rel_rec, rel_send):
+        """
+        update edge embeddings according to the nodes connected to the edges
+        G = (V, E)
+        x: embedding vectors of nodes: |V|*hn (hn: dimensions of each node embedding)
+        rel_rec: Matrix denoting incomming edges of nodes: |E|*|V|
+        rel_send: Matrix denoting outcomming edges of nodes: |E|*|V|
+        """
         # NOTE: Assumes that we have the same graph across all samples.
-        receivers = torch.matmul(rel_rec, x)
-        senders = torch.matmul(rel_send, x)
+        receivers = torch.matmul(rel_rec, x) #vectors of embeddings of incomming nodes (receivers):|V|*hn
+        senders = torch.matmul(rel_send, x)  #vectors of embeddings of outcomming nodes (senders): |V|*hn
         edges = torch.cat([senders, receivers], dim=2)
         return edges
 
     def forward(self, inputs, rel_rec, rel_send):
         # Input shape: [num_sims, num_atoms, num_timesteps, num_dims]
+        # num_sims = batch_size, num_atoms = number_of_nodes?
         x = inputs.view(inputs.size(0), inputs.size(1), -1)
         # New shape: [num_sims, num_atoms, num_timesteps*num_dims]
 
@@ -131,14 +159,14 @@ class MLPEncoder(nn.Module):
 
         x = self.node2edge(x, rel_rec, rel_send)
         x = self.mlp2(x)
-        x_skip = x
+        x_skip = x #x_skip: edge embeddings
 
         if self.factor:
             x = self.edge2node(x, rel_rec, rel_send)
             x = self.mlp3(x)
             x = self.node2edge(x, rel_rec, rel_send)
             x = torch.cat((x, x_skip), dim=2)  # Skip connection
-            x = self.mlp4(x)
+            x = self.mlp4(x) #edge embeddings
         else:
             x = self.mlp3(x)
             x = torch.cat((x, x_skip), dim=2)  # Skip connection
@@ -417,6 +445,7 @@ class MLPDecoder(nn.Module):
 
     def __init__(self, n_in_node, edge_types, msg_hid, msg_out, n_hid,
                  do_prob=0., skip_first=False):
+        # skip_first: when the first edge type denotes non-interaction ?
         super(MLPDecoder, self).__init__()
         self.msg_fc1 = nn.ModuleList(
             [nn.Linear(2 * n_in_node, msg_hid) for _ in range(edge_types)])
